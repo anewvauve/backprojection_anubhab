@@ -378,8 +378,7 @@ def main(argv):
     # Making potential sources grid
     ##########################################################################
     #slong,slat          = bp_lib.make_source_grid(event_long,event_lat,source_grid_extend,source_grid_size)
-    #slong,slat          = bp_lib.make_source_grid_hetero(event_long,event_lat,source_grid_extend_x,source_grid_extend_y,source_grid_size)
-    slong,slat          = bp_lib.make_source_grid_along_strike_mod(51, event_lat, event_long, 500, 150, 10) 
+    slong,slat          = bp_lib.make_source_grid_hetero(event_long,event_lat,source_grid_extend_x,source_grid_extend_y,source_grid_size)
     ##########################################################################
     print('Finished preparing data.')
     print("Total time taken: {:.1f} min".format((time.time()-time_start)/60.0))

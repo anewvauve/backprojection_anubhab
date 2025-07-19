@@ -27,6 +27,61 @@ from mpl_toolkits.basemap import Basemap
 from obspy.imaging.beachball import beach
 import numpy as np
 ########### 
+
+def stream_info(stream_in):
+    '''
+    retunrs stream info:sta,sta_lat,sta_long,dist,azimuth
+    '''
+    sta = []
+    sta_lat = []
+    sta_long = []
+    dist = []
+    azimuth = []
+    #backazimuth = []
+    for tr in stream_in:
+        sta_long.append(tr.stats.station_longitude)
+        sta_lat.append(tr.stats.station_latitude)
+        dist.append(tr.stats.Dist)
+        azimuth.append(tr.stats.Azimuth)
+        #backazimuth.append(tr.stats.Backazimuth)
+    #to_save = np.column_stack((to_save,backazimuth))
+    #np.save('array_bp_info',to_save,allow_pickle=True)
+    return sta,sta_lat,sta_long,dist,azimuth
+def get_stream_stack(stream_in,model,event_depth,origin_time):
+    '''
+    Retunrs stack of the stream as a trace to be used as reference.
+    '''
+    sta,sta_lat,sta_long,sta_dist,sta_azimuth=stream_info(stream_in)
+    temp=stream_in.copy()
+    stack_tr=temp.stack()[0]
+    stack_tr.stats['Dist']              = np.mean(sta_dist)
+    stack_tr.stats['Azimuth']           = np.mean(sta_azimuth)
+    stack_tr.stats['station_latitude']  = np.mean(sta_lat)
+    stack_tr.stats['station_longitude'] = np.mean(sta_long)
+    stack_tr.stats['origin_time']       = origin_time
+    arrivals                     = model.get_travel_times(source_depth_in_km=event_depth,distance_in_degree=stack_tr.stats.Dist,
+                                                          phase_list=["P"])
+    arr                          = arrivals[0]
+    t_travel                     = arr.time;
+    stack_tr.stats['P_arrival']         = origin_time + t_travel 
+    stack_tr.stats['channel']=stream_in[-1].stats['channel']
+    stack_tr.stats['sampling_rate']=stream_in[-1].stats['sampling_rate']
+    stack_tr.stats['starttime']=stream_in[-1].stats['starttime']
+    ref_trace=stack_tr
+    return ref_trace
+
+def detrend_normalize_stream(stream,type='dmean'):
+    """
+    Detrend the stream traces
+    Input
+    """
+    for tr in stream:
+        if tr.stats['npts'] > 0:
+            tr.detrend(type=type)
+            tr.normalize()
+        else:
+            print('Trace has no data, hence not detrending')
+    return stream
 def array_selection_plot(stream,event_lat,event_long,az_min,az_max,dist_min,dist_max,threshold_correlation,corr_window,bp_l,bp_u):
     fig, ax = plt.subplots(1, 2, sharex=False, sharey=False,figsize=(10,3))
     #map =  Basemap(projection='cyl', lon_0=event_long,lat_0=event_lat,
@@ -259,6 +314,31 @@ def stream_cut_P_arrival_normalize(stream,cut_start,cut_end):
         else:
             t.normalize()
     return stream
+def stream_cut_P_arrival(stream,cut_start,cut_end):
+    '''
+    This function cuts the traces in a stream relative to P_arrival
+    with a window in seconds before and after and normalizes the amplitude.
+    It also checks if the trimed trace has expected lenght if not then the trace
+    is removed
+    
+    Input:
+    stream : obspy stream with P_arrivals
+    cut_start : cut before P arrival
+    cut_end :m cut after P arrival
+
+    Output:
+    stream : obspy stream
+    '''
+    print('Total no of traces before data gap checks:', len(stream))
+    for t in stream:
+        t.trim(t.stats['P_arrival']-cut_start,t.stats['P_arrival']+cut_end)
+        if t.stats.npts < (cut_start+cut_end)/t.stats.delta:
+            stream.remove(t)
+        else:
+            pass
+    return stream
+
+
 def stream_station_weight(stream,distance_thresh=1.0):
     '''
     This function computes stations weights in an array
@@ -473,6 +553,7 @@ def crosscorr_prev(t1_trace,t2_trace,window):
     sps=int(t1_trace.stats['sampling_rate'])
     #cc=obspy.signal.cross_correlation.correlate(t1_trace[ref_st:ref_end],t2_trace[st:end],demean=True,normalize='naive',method='auto',shift=window*sps)
     cc=obspy.signal.cross_correlation.correlate(t1_trace,t2_trace,demean=True,normalize='naive',method='auto',shift=window*sps)
+    
     shift, value = obspy.signal.cross_correlation.xcorr_max(cc)
     if (value < 0):
             sign=-1;
@@ -480,11 +561,49 @@ def crosscorr_prev(t1_trace,t2_trace,window):
             sign=1;
 
     return abs(value),shift/sps,sign
-def crosscorr_stream_prev(stream,ref_trace,window):
+def crosscorr_template(t1_trace,t2_trace,window):
+    '''
+
+    '''
+    sps=int(t1_trace.stats['sampling_rate'])
+    #cc=obspy.signal.cross_correlation.correlate(t1_trace[ref_st:ref_end],t2_trace[st:end],demean=True,normalize='naive',method='auto',shift=window*sps)
+    #cc=obspy.signal.cross_correlation.correlate(t1_trace,t2_trace,demean=True,normalize='naive',method='auto',shift=window*sps)
+    cc=obspy.signal.cross_correlation.correlate_template(t1_trace,t2_trace,demean=True,
+                                                         normalize='full',method='auto',shift=window*sps)
+    
+    shift, value = obspy.signal.cross_correlation.xcorr_max(cc)
+    if (value < 0):
+            sign=-1;
+    else:
+            sign=1;
+
+    return abs(value),shift/sps,sign
+def crosscorr_stream_prev(stream,ref_trace,window,corr_thresh=0.5):
     '''
     '''
     for tr in stream:
         corr,shift,sign = crosscorr_prev(ref_trace,tr,window)
+        if np.abs(corr)>=corr_thresh:
+            tr.stats['Corr_coeff'] = corr
+            tr.stats['Corr_shift']  = shift
+            if corr<0:
+                tr.stats['Corr_sign']  = -1.0
+            else: 
+                tr.stats['Corr_sign']  = 1.0
+        else:
+            stream.remove(tr)
+        #try:
+        #    corr,shift,sign = crosscorr_prev(ref_trace,tr,window)
+        #    if np.abs(corr)>=corr_thresh:
+        #        #tr.stats['Corr_coeff'] = corr
+        #        tr.stats['Corr_shift']  = shift
+        #        if corr<0:
+        #            tr.stats['Corr_sign']  = -1.0
+        #        else:
+        #            tr.stats['Corr_sign']  = 1.0
+        #    else:
+        #        stream.remove(tr)
+
         tr.stats['Corr_coeff'] = corr
         tr.stats['Corr_shift']  = shift
         tr.stats['Corr_sign']  = sign
@@ -535,13 +654,16 @@ def crosscorr_stream(stream,ref_trace,window):
         if message=='ok':
             tr.stats['Corr_coeff'] = corr
             tr.stats['Corr_shift']  = shift
-            tr.stats['Corr_sign']  = sign
+            if value<0:
+                tr.stats['Corr_sign']  = -1.0
+            else: 
+                tr.stats['Corr_sign']  = 1.0
         else:
             stream.remove(tr)
         #except:
         #    stream.remove(tr)
     return stream
-def crosscorr_stream_xcorr(stream,ref_trace,time_before,time_after,max_lag,bp_l,bp_u,corr_thresh):
+def crosscorr_stream_xcorr_P_arrival(stream,ref_trace,time_before,time_after,max_lag,bp_l,bp_u,corr_thresh):
     '''
     '''
     for tr in stream:
@@ -557,14 +679,17 @@ def crosscorr_stream_xcorr(stream,ref_trace,time_before,time_after,max_lag,bp_l,
             if (abs(value) >= corr_thresh):
                 tr.stats['Corr_coeff'] = value
                 tr.stats['Corr_shift']  = shift
-                tr.stats['Corr_sign']  = 1.0
+                if value<0:
+                    tr.stats['Corr_sign']  = -1.0
+                else: 
+                    tr.stats['Corr_sign']  = 1.0
             else:
                 stream.remove(tr)
         except:
             print('Could not cross-correlate! Hence remove this waveform.')
             stream.remove(tr)
     return stream
-def crosscorr_stream_xcorr_no_filter(stream,ref_trace,time_before,time_after,max_lag,corr_thresh):
+def crosscorr_stream_xcorr_no_filter_P_arrival(stream,ref_trace,time_before,time_after,max_lag,corr_thresh):
     '''
     This function cross-correlates traces around P arrival in an obspy stream with a reference trace.
     It also removes traces that have correlation coefficient less an input threshold
@@ -592,14 +717,87 @@ def crosscorr_stream_xcorr_no_filter(stream,ref_trace,time_before,time_after,max
             if (abs(value) >= corr_thresh):
                 tr.stats['Corr_coeff'] = value
                 tr.stats['Corr_shift']  = shift
-                tr.stats['Corr_sign']  = 1.0
+                if value<0:
+                    tr.stats['Corr_sign']  = -1.0
+                else: 
+                    tr.stats['Corr_sign']  = 1.0
             else:
-                #print('Could cross-correlate but lower threshold! Hence remove this waveform.')                
                 stream.remove(tr)
         except:
             print('Could not cross-correlate! Hence remove this waveform.')
             stream.remove(tr)
     return stream
+
+def crosscorr_stream_xcorr_no_filter(stream,ref_trace,time_start,time_before,time_after,max_lag,corr_thresh):
+    '''
+    This function cross-correlates traces at a point specified by a time starting from the start of the trace
+    from the  in an obspy stream with a reference trace.
+    It also removes traces that have correlation coefficient less an input threshold
+    Note: traces are not filtered before cross-correlation
+
+    Input:
+    stream : obspy stream
+    ref_trace : reference trace in the stream
+    time_start : time after the startime of the trace
+    time_before : time before P arrival i.e., corr window
+    time_after : time after P arrival,i.e., corr window
+    max_lag : maximum lag for cross-correlation 
+    corr_thresh : correlation value below which traces are removed.
+
+    '''
+    for tr in stream:
+        try:
+            shift, value = xcorr_pick_correction(ref_trace.stats.starttime+time_start, ref_trace,tr.stats.starttime+time_start, tr,
+                t_before=time_before, t_after=time_after, cc_maxlag=max_lag)#,filter="bandpass",filter_options={'freqmin': bp_l, 'freqmax': bp_u})
+            if (abs(value) >= corr_thresh):
+                tr.stats['Corr_coeff'] = value
+                tr.stats['Corr_shift']  = shift
+                if value<0:
+                    tr.stats['Corr_sign']  = -1.0
+                else: 
+                    tr.stats['Corr_sign']  = 1.0
+            else:
+                print('Could not cross-correlate! Hence remove this waveform.')
+                stream.remove(tr)
+        except:
+            print('Could not cross-correlate! Hence remove this waveform.')
+            stream.remove(tr)
+    return stream
+
+def crosscorr_stream_xcorr(stream,ref_trace,time_start,time_before,time_after,max_lag,bp_l,bp_u,corr_thresh):
+    '''
+    This function cross-correlates traces at a point specified by a time starting from the start of the trace
+    from the  in an obspy stream with a reference trace.
+    It also removes traces that have correlation coefficient less an input threshold
+    Note: traces are not filtered before cross-correlation
+
+    Input:
+    stream : obspy stream
+    ref_trace : reference trace in the stream
+    time_start : time after the startime of the trace
+    time_before : time before P arrival i.e., corr window
+    time_after : time after P arrival,i.e., corr window
+    max_lag : maximum lag for cross-correlation 
+    corr_thresh : correlation value below which traces are removed.
+
+    '''
+    for tr_ in stream:
+        try:
+            tr=tr_.copy() # working with a copy not change the data
+            shift, value = xcorr_pick_correction(ref_trace.stats.starttime+time_start, ref_trace,tr.stats.starttime+time_start, tr,
+                t_before=time_before, t_after=time_after, cc_maxlag=max_lag,filter="bandpass",filter_options={'freqmin': bp_l, 'freqmax': bp_u})
+            if (abs(value) >= corr_thresh):
+                tr_.stats['Corr_coeff'] = value
+                tr_.stats['Corr_shift']  = shift
+                tr_.stats['Corr_sign']  = 1.0
+            else:
+                stream.remove(tr_)
+        except:
+            print('Could not cross-correlate! Hence remove this waveform.')
+            stream.remove(tr_)
+    return stream
+
+
 def snr_calc(tr, noise_window, signal_window):
     """
     """
@@ -632,10 +830,10 @@ def snr_check(stream,SNR,t_before,t_after):
     '''
     This function checks if all the waveform data has 20 SPS. At the moment it can detect
     all the possible values and can decimate to 20 SPS.
-    Sometimes waveforms have a SPS which are not integer multiple of 20 SPS, I simply reject them.
+    Sometimes waveforms have a SPS which not interger multiple of 20 SPS, I simply reject them.
     Yes, you can decimate and interpolate these waveforms back 20 SPS but I choose not to play with
     the signal and try to make them as original as possible without the interpolation that might
-    introduce "artifacts".
+    introduce "ärtifacts".
     @ajay6763: MAKE THIS A ROBUST FUNCTION.
     '''
     for t in stream:
@@ -835,7 +1033,7 @@ def make_source_grid_hetero(event_long,event_lat,source_grid_extend_x,
                             source_grid_extend_y,source_grid_size):
     '''
     This function makes potential source grid around the epicentre in a area
-    defined by a variable source_grid_extend in x and y directions, discretized at a constant
+    defined by a constant source_grid_extend discretized at a constant
     source_grid_size
     Retunrs   slat ,slong
 
@@ -870,61 +1068,60 @@ def make_source_grid_3D(event_long,event_lat,source_grid_extend,source_grid_size
                 slat.append(y[j])
                 sdepth.append(z[k])
     return slong,slat,sdepth
-
+    
 #make source_grid along_strike requires two helping functions
 def strike_coords(strike, event_lat, event_long,extend):
-    
-    '''returns longtitudes and latitudes along one direction of strike.
-    '''
-    
     y_dist=extend * (np.cos(np.deg2rad(strike)))
     new_lat= event_lat + (y_dist/111.1)
     x_dist=extend * (np.sin(np.deg2rad(strike)))
+   # denom=111.32
     denom = 111.32 * np.cos(np.deg2rad(event_lat))
     if np.abs(denom) < 1e-2:
         new_long = event_long  # No reliable longitude change, would result in unsuitable values
     else:
         new_long = event_long + (x_dist / denom)
     
-    return new_lat, new_long 
+    return new_lat, new_long
 
-def strike_coords_list(strike, event_lat, event_long,extend, gridsize):
-    '''returns a list of lat and long along opposite directions, along the strike from th source point. 
-    '''
+def eqspaced_points_list(strike, event_lat, event_long, extend, grid_size):
     lat_long_list=[]
-    grid_list=np.arange(0,1,gridsize, dtype=float)
-    rev_grid_list=grid_list[::-1]
-    for j in rev_grid_list:
-        lat_long_list.append(strike_coords(strike, event_lat, event_long, (-1)*extend*(j + gridsize)))
-    lat_long_list.append(strike_coords(strike, event_lat, event_long, 0))
-    for i in grid_list:
-        lat_long_list.append(strike_coords(strike, event_lat, event_long, extend*(i + gridsize)))
+    spacing=np.arange(grid_size,extend+grid_size, grid_size)
     
-    return lat_long_list 
+    #for i in spacing:
+     #   lat_long_list.append(strike_coords(strike, event_lat, event_long, -i))
+    lat_long_list.append(strike_coords(strike, event_lat, event_long, 0))
+    for j in spacing:
+        lat_long_list.append(strike_coords(strike, event_lat, event_long, j))
+    
+    return lat_long_list
 
-def make_source_grid_along_strike(strike, event_lat, event_long, x_extend, y_extend, gridsize):
+def make_source_grid_along_strike_mod(strike, event_lat, event_long, x_extend, y_extend, grid_size_km_spacing):
 
     '''The main differences in this function from the previous make_source_grid_hetero are
     1)This function orients the source grid along the strike direction
     2)This function has its x and y extends in Kms, rather than in degrees. although 
     there can be a 
+    3)The grid points are placed in equivalent extends, which are given in kilometers. 
     modification made so that we can input in degrees rather than in kilometers
     '''
-    
     grid_list=[]
     temp=[]
-    strike_perpendicular = (strike + 90) % 360
-    strike_perpendicular_list=strike_coords_list( strike_perpendicular, event_lat, event_long, y_extend, gridsize)
-    for i in strike_perpendicular_list:
-        temp=strike_coords_list(strike, i[0], i[1], x_extend, gridsize)
-        grid_list.append(temp)
-        temp=[]
     slat=[]
     slong=[]
+    strike_perpendicular = (strike + 90) % 360
+    a_lat, a_long=strike_coords(strike, event_lat, event_long, -x_extend)
+    target_lat, target_long=strike_coords(strike_perpendicular, a_lat, a_long, -y_extend)
+    starting_point=[target_lat, target_long]
+    strike_perpendicular_list=eqspaced_points_list(strike_perpendicular, starting_point[0], starting_point[1], 2*y_extend, grid_size_km_spacing)
+    for i in strike_perpendicular_list:
+        temp=eqspaced_points_list(strike, i[0], i[1], 2*x_extend, grid_size_km_spacing)
+        grid_list.append(temp)
+        temp=[]
+    
     slat = [coord[0] for row in grid_list for coord in row]
     slong= [coord[1] for row in grid_list for coord in row]
     return slong, slat
-    
+ 
 def check_sps(stream,sps):
     '''
     This function checks if all the waveform data has 20 SPS. At the moment it can detect
